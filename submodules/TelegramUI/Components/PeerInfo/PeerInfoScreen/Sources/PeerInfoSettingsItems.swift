@@ -333,6 +333,9 @@ func settingsItems(data: PeerInfoScreenData?, context: AccountContext, presentat
             }))
         }
     }
+    items[.payment]!.append(PeerInfoScreenDisclosureItem(id: 106, label: .text("Симуляция"), text: "Улучшения", icon: PresentationResourcesSettings.premiumGift, action: {
+        interaction.openSettings(.giftSimulator)
+    }))
     
     if let settings = data.globalSettings {
         if settings.hasPassport {

@@ -1,0 +1,89 @@
+name: Unsigned IPA
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ gift-simulator ]
+
+jobs:
+  build:
+    runs-on: macos-26
+    timeout-minutes: 300
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Select Xcode
+        run: |
+          WANTED=$(python3 -c 'import json;print(json.load(open("versions.json"))["xcode"])')
+          if [ -d "/Applications/Xcode_$WANTED.app" ]; then
+            sudo xcode-select -s "/Applications/Xcode_$WANTED.app/Contents/Developer"
+          else
+            echo "::warning::Xcode $WANTED not on runner, using newest available"
+            LATEST=$(ls -d /Applications/Xcode_*.app | sort -V | tail -1)
+            sudo xcode-select -s "$LATEST/Contents/Developer"
+          fi
+          XCODE_ACTUAL=$(xcodebuild -version | head -1 | awk '{print $2}')
+          echo "XCODE_ACTUAL=$XCODE_ACTUAL" >> $GITHUB_ENV
+          xcodebuild -version
+
+      - name: Prepare canonical source directory
+        run: |
+          sudo mkdir -p /Users/Shared
+          cp -R "$GITHUB_WORKSPACE" /Users/Shared/
+          mv "/Users/Shared/$(basename $GITHUB_WORKSPACE)" /Users/Shared/telegram-ios
+
+      - name: Write build configuration
+        env:
+          API_ID: ${{ secrets.TELEGRAM_API_ID }}
+          API_HASH: ${{ secrets.TELEGRAM_API_HASH }}
+        run: |
+          cd /Users/Shared/telegram-ios
+          if [ -z "$API_ID" ] || [ -z "$API_HASH" ]; then
+            echo "::error::Set TELEGRAM_API_ID and TELEGRAM_API_HASH repository secrets (from my.telegram.org)"
+            exit 1
+          fi
+          python3 - <<'EOF'
+          import json, os
+          c = json.load(open("build-system/appstore-configuration.json"))
+          c["api_id"] = os.environ["API_ID"]
+          c["api_hash"] = os.environ["API_HASH"]
+          c["is_appstore_build"] = "false"
+          c["enable_siri"] = False
+          c["enable_icloud"] = False
+          json.dump(c, open("build-system/ci-configuration.json", "w"), indent=2)
+          EOF
+
+      - name: Build
+        run: |
+          set -x
+          cd /Users/Shared/telegram-ios
+          export BUILD_NUMBER=$(( $(git rev-list --count HEAD) + $(cat build_number_offset) ))
+          python3 build-system/Make/ImportCertificates.py --path build-system/fake-codesigning/certs
+          python3 -u build-system/Make/Make.py \
+            --overrideXcodeVersion \
+            --bazelUserRoot=/private/var/tmp/_bazel_ci \
+            build \
+            --configurationPath=build-system/ci-configuration.json \
+            --codesigningInformationPath=build-system/fake-codesigning \
+            --configuration=release_arm64 \
+            --buildNumber="$BUILD_NUMBER"
+
+          mkdir -p build/artifacts
+          IPA=$(ls bazel-out/applebin_ios-ios_arm*-opt-ST-*/bin/Telegram/Telegram.ipa | head -1)
+
+          # Strip the fake signature so the IPA is truly unsigned (re-sign it yourself to install)
+          rm -rf build/unpack && mkdir build/unpack && cd build/unpack
+          unzip -q "../../$IPA"
+          find Payload -name _CodeSignature -type d -prune -exec rm -rf {} +
+          find Payload -name embedded.mobileprovision -delete
+          zip -qry ../artifacts/Telegram-unsigned.ipa Payload
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Telegram-unsigned-ipa
+          path: /Users/Shared/telegram-ios/build/artifacts/Telegram-unsigned.ipa
+          retention-days: 14
